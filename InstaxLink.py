@@ -8,6 +8,7 @@ import io
 import os
 from PIL import Image
 from bleak import BleakScanner, BleakClient
+import bluetooth
 
 # Enumerations
 
@@ -506,7 +507,135 @@ class LightCorrectInfoResponse():
 
 # Communication
 
-class InstaxConnection:
+class InstaxSocketConnection:
+    def __init__(self, device_name, debug = False):
+        # TODO: find the port via SDP and UUID = "00001101-0000-1000-8000-00805F9B34FB"
+        self.port = 6
+        self.device_name = device_name.upper()
+        self.debug = debug
+        self.socket = None
+    
+    def discover(self):
+        devices = bluetooth.discover_devices(lookup_names = True) # list of tuples [(address, name)]
+        for device in devices:
+            if device[1].upper() == self.device_name:
+                return device[0]
+        return None
+    
+    def connect(self):
+        address = self.discover()
+        if address:
+            print("Found Instax Link at address: %s" % (address))
+            try:
+                print("Attempting to connect...")
+                self.socket = bluetooth.BluetoothSocket()
+                self.socket.settimeout(5)
+                self.socket.connect((address, self.port))
+                print("Connected")
+            except Exception as e:
+                print("Failed to connect! %s" % e)
+        else:
+            raise Exception("Instax Link %s not found" % self.device_name)
+        
+    def disconnect(self):
+        try:
+            print("Disconnecting...")
+            self.socket.close()
+            print("Disconnected")
+        except Exception as e:
+            print("Failed to disconnect! %s" % e)
+
+    def get_info(self):
+        print("get_info is not implemented using Bluetooth Socket!")
+
+    def send_command(self, payload):
+        if self.debug:
+            print("Sending payload %s" % payload.hex(' ', 1))
+        self.socket.send(payload)
+        data = self.socket.recv(1024)
+        if self.debug:
+            print(data)
+        response = Response(data)
+        if self.debug:
+            print("Received response %s" % response)
+        if response.valid:
+            sid = response.message.sid
+            if sid == SID.SUPPORT_FUNCTION_AND_VERSION_INFO:
+                return SupportFunctionaAndVersionInfoResponse(response.message.data)
+            elif sid == SID.DEVICE_INFO_SERVICE:
+                return DeviceInfoResponse(response.message.data)
+            elif sid == SID.SUPPORT_FUNCTION_INFO:
+                return SupportFunctionInfoResponse(response.message.data)
+            elif sid == SID.ADDITIONAL_PRINTER_INFO:
+                return AdditionalPrinterInfoResponse(response.message.data)
+            elif sid == SID.PRINTER_HEAD_LIGHT_CORRECT_INFO:
+                return LightCorrectInfoResponse(response.message.data)
+            elif sid == SID.AUTO_SLEEP_SETTINGS:
+                return AutoSleepSettingsResponse(response.message.data)
+            elif sid == SID.PRINT_IMAGE_DOWNLOAD_START:
+                return ImageTransferStartResponse(response.message.data)
+            elif sid == SID.PRINT_IMAGE_DOWNLOAD_DATA:
+                return ImageFrameTransferResponse(response.message.data)
+            elif sid == SID.PRINT_IMAGE_DOWNLOAD_END:
+                return None
+            elif sid == SID.PRINT_IMAGE:
+                return ImagePrintResponse(response.message.data)
+            else:
+                print("Unsupported SID %s!" % sid.name)
+                return None
+        else:
+            print("Invalid response!")
+            return None
+    
+    def request_version_info(self):
+        return self.send_command(SupportFunctionaAndVersionInfoRequest().message.get_payload())
+    
+    def request_device_info_model(self):
+        return self.send_command(DeviceInfoRequest(DeviceInfoType.MODEL_NUMBER).message.get_payload())
+    
+    def request_device_info_serial(self):
+        return self.send_command(DeviceInfoRequest(DeviceInfoType.SERIAL_NUMBER).message.get_payload())
+    
+    def request_device_info_hw(self):
+        return self.send_command(DeviceInfoRequest(DeviceInfoType.HW_REVISION).message.get_payload())
+    
+    def request_function_info_image(self):
+        return self.send_command(SupportFunctionInfoRequest(SupportFunctionInfoType.IMAGE_SUPPORT_INFO).message.get_payload())
+    
+    def request_function_info_battery(self):
+        return self.send_command(SupportFunctionInfoRequest(SupportFunctionInfoType.BATTERY_INFO).message.get_payload())
+    
+    def request_function_info_printer_function(self):
+        return self.send_command(SupportFunctionInfoRequest(SupportFunctionInfoType.PRINTER_FUNCTION_INFO).message.get_payload())
+    
+    def request_function_info_print_history(self):
+        return self.send_command(SupportFunctionInfoRequest(SupportFunctionInfoType.PRINT_HISTORY_INFO).message.get_payload())
+    
+    def request_printer_info_voltage(self):
+        return self.send_command(AdditionalPrinterInfoRequest(AdditionalPrinterInfoType.VOLTAGE_INFO).message.get_payload())
+
+    def request_printer_info_color(self):
+        return self.send_command(AdditionalPrinterInfoRequest(AdditionalPrinterInfoType.COLOR_INFO).message.get_payload())
+    
+    def request_request_head_calibration_info(self):
+        return self.send_command(LightCorrectInfoRequest().message.get_payload())
+
+    def request_sleep_settings_extend(self, time1, time2, time3, time4):
+        return self.send_command(AutoSleepSettingsRequest(AutoSleepSettingsMode.EXTEND_CURRENT_SLEEP_SETTING, time1, time2, time3, time4).message.get_payload())
+    
+    def request_image_transfer_start(self, pictureType, picturePrintOption, size):
+        return self.send_command(ImageTransferStartRequest(pictureType, picturePrintOption, size).message.get_payload())
+    
+    def request_image_frame_transfer(self, frameNumber, frameData):
+        return self.send_command(ImageFrameTransferRequest(frameNumber, frameData).message.get_payload())
+    
+    def request_image_transfer_end(self):
+        return self.send_command(ImageTransferEndRequest().message.get_payload())
+    
+    def request_print(self):
+        return self.send_command(ImagePrintRequest().message.get_payload())
+
+class InstaxBLEConnection:
     def __init__(self, device_name, debug = False):
 
         self.serviceUUID = '70954782-2d83-473d-9e5f-81e1d02d5273'
@@ -701,7 +830,13 @@ class InstaxConnection:
 class InstaxPrinter:
     def __init__(self, device_name, image_path = None, debug = False):
         self.debug = debug
-        self.connection = InstaxConnection(device_name, debug)
+        self.connection = None
+        self.concurrent = False
+        if "ANDROID" in device_name.upper():
+            self.connection = InstaxSocketConnection(device_name, debug)
+        else:
+            self.connection = InstaxBLEConnection(device_name, debug)
+            self.concurrent = True
         
         self.model = ''
         self.serial = ''
@@ -723,15 +858,26 @@ class InstaxPrinter:
         return f'Model: {self.model}, battery level: {self.batteryLevel}, remaining pictures: {self.remainingPictures}, status: {self.printerStatus.name}'
     
     async def connect(self):
-        await self.connection.connect()
-        self.set_device_info(await self.connection.request_device_info_model())
-        self.set_device_info(await self.connection.request_device_info_serial())
-        self.set_device_info(await self.connection.request_device_info_hw())
-        self.set_function_info(await self.connection.request_function_info_image())
-        self.set_function_info(await self.connection.request_function_info_printer_function())
+        if self.concurrent:
+            await self.connection.connect()
+            self.set_device_info(await self.connection.request_device_info_model())
+            self.set_device_info(await self.connection.request_device_info_serial())
+            self.set_device_info(await self.connection.request_device_info_hw())
+            self.set_function_info(await self.connection.request_function_info_image())
+            self.set_function_info(await self.connection.request_function_info_printer_function())
+        else:
+            self.connection.connect()
+            self.set_device_info(self.connection.request_device_info_model())
+            self.set_device_info(self.connection.request_device_info_serial())
+            self.set_device_info(self.connection.request_device_info_hw())
+            self.set_function_info(self.connection.request_function_info_image())
+            self.set_function_info(self.connection.request_function_info_printer_function())
     
     async def disconnect(self):
-        await self.connection.disconnect()
+        if self.concurrent:
+            await self.connection.disconnect()
+        else:
+            self.connection.disconnect()
     
     def set_device_info(self, data):
         if data.type == DeviceInfoType.MODEL_NUMBER:
@@ -756,9 +902,10 @@ class InstaxPrinter:
         self.imageFrameSize = data.frameSize
 
     def check_image(self):
-        image = Image.open(self.imagePath)
-        if image.width == self.imageWidth and image.height == self.imageHeight and image.format == 'JPEG' and os.path.getsize(self.imagePath) <= self.maxImageSize:
-            return True
+        if self.imagePath:
+            image = Image.open(self.imagePath)
+            if image.width == self.imageWidth and image.height == self.imageHeight and image.format == 'JPEG' and os.path.getsize(self.imagePath) <= self.maxImageSize:
+                return True
         return False
     
     def prepare_image(self): # TODO: resize and compress according to requirements, if needed
@@ -768,28 +915,29 @@ class InstaxPrinter:
         return img_byte_arr.getvalue()
     
     async def print_image(self):
-        if self.check_image():
-            with open(self.imagePath, 'rb') as image:
-                img_byte_arr = image.read()
-                if self.debug:
-                    print("Image size %i" % len(img_byte_arr))
-                self.set_image_transfer_info(await self.connection.request_image_transfer_start(PictureType.PICINF_PICTYPE_JPEG, PicturePrintOption.PICINF_PICOP_NONE, len(img_byte_arr)))
-                frames = slice_image(img_byte_arr, self.imageFrameSize)
-                if self.debug:
-                    print("Requested frame size %i, prepared frame size %i, number of frames %i" % (self.imageFrameSize, len(frames[0]), len(frames)))
-            for i in range(len(frames)):
-                frameNumber = (await self.connection.request_image_frame_transfer(i, frames[i])).frameNumber
-                print("Transferred frame number %i of %i" % (frameNumber + 1, len(frames)))
-            await self.connection.request_image_transfer_end()
-            endTime = await self.connection.request_print()
-            print("Printing... Estimated time required %i seconds" % endTime)
-            self.set_function_info(await self.connection.request_function_info_printer_function())
-            while self.printerStatus == PrinterResults.PRINTER_PROCESSING:
+        if self.imagePath:
+            if self.check_image():
+                with open(self.imagePath, 'rb') as image:
+                    img_byte_arr = image.read()
+                    if self.debug:
+                        print("Image size %i" % len(img_byte_arr))
+                    self.set_image_transfer_info(await self.connection.request_image_transfer_start(PictureType.PICINF_PICTYPE_JPEG, PicturePrintOption.PICINF_PICOP_NONE, len(img_byte_arr)))
+                    frames = slice_image(img_byte_arr, self.imageFrameSize)
+                    if self.debug:
+                        print("Requested frame size %i, prepared frame size %i, number of frames %i" % (self.imageFrameSize, len(frames[0]), len(frames)))
+                for i in range(len(frames)):
+                    frameNumber = (await self.connection.request_image_frame_transfer(i, frames[i])).frameNumber
+                    print("Transferred frame number %i of %i" % (frameNumber + 1, len(frames)))
+                await self.connection.request_image_transfer_end()
+                endTime = await self.connection.request_print()
+                print("Printing... Estimated time required %i seconds" % endTime)
                 self.set_function_info(await self.connection.request_function_info_printer_function())
-                await asyncio.sleep(1.0)
-            print("Print process completed with status %s" % self.printerStatus.name)
-        else:
-            print("The provided image cannot be printed! It must be a JPG file with height %i, width %i and maximum size %i KB" % (self.imageHeight, self.imageWidth, self.maxImageSize))
+                while self.printerStatus == PrinterResults.PRINTER_PROCESSING:
+                    self.set_function_info(await self.connection.request_function_info_printer_function())
+                    await asyncio.sleep(1.0)
+                print("Print process completed with status %s" % self.printerStatus.name)
+            else:
+                print("The provided image cannot be printed! It must be a JPG file with height %i, width %i and maximum size %i KB" % (self.imageHeight, self.imageWidth, self.maxImageSize))
 
 # main
 
@@ -805,7 +953,7 @@ async def main(args={}):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description = "Utility to print a JPG image to an InstaxLink printer")
-    parser.add_argument('-n', '--device-name', help = 'Device name, format INSTAX-xxxxxxxx(IOS)') # INSTAX-20189264(IOS)
+    parser.add_argument('-n', '--device-name', help = 'Device name, format INSTAX-xxxxxxxx(IOS) or INSTAX-xxxxxxxx(ANDROID)') # INSTAX-20189264(IOS)
     parser.add_argument('-i', '--image-path', help = 'Path to the image file')
     parser.add_argument('-d', '--debug', action = 'store_true')
     args = parser.parse_args()
